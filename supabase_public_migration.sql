@@ -63,4 +63,4 @@ drop policy if exists "numeros_buyer_or_admin_update" on numeros_rifa;
 create policy "numeros_buyer_or_admin_update"
   on numeros_rifa for update
   using (comprador_id is null or auth.uid() = comprador_id or is_admin())
-  with check (auth.uid() = comprador_id or is_admin());
+  with check (comprador_id is null or auth.uid() = comprador_id or is_admin());
