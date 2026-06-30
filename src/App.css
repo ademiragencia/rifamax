@@ -671,6 +671,21 @@ textarea:focus {
   font-size: 0.82rem;
 }
 
+.status-pill.confirmado {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.status-pill.pendente {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.status-pill.falha {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
 .status-pill.success {
   color: #166534;
   background: #dcfce7;
