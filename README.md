@@ -1,5 +1,92 @@
 # RifaMax
 
+Aplicacao React/Vite para rifas online com Supabase e Mercado Pago. A versao publicada em producao usa banco real, checkout oficial e rotas serverless na Vercel.
+
+## Rodar localmente
+
+```bash
+npm install
+npm run dev
+```
+
+Abra a URL exibida pelo Vite.
+
+## Acessos locais de teste
+
+- Admin: `admin@rifamax.com` / `admin123`
+- Cliente: `cliente@rifamax.com` / `cliente123`
+
+## O que foi finalizado
+
+- Projeto Vite/React executavel.
+- Tela de rifas com busca, imagens, progresso e metricas.
+- Login, cadastro e sessao com Supabase em producao.
+- Painel administrativo com estatisticas, criacao de rifas e ativar/inativar.
+- Compra de numeros com reserva transacional, bloqueio de numeros vendidos e historico.
+- Persistencia em `localStorage` para testar sem backend.
+- Rotas Mercado Pago em `api/mercadopago`.
+- `supabase_schema.sql` e `supabase_public_migration.sql` com RLS, policies e funcao segura de compra.
+
+## Supabase
+
+1. Crie um projeto no Supabase.
+2. Execute `supabase_schema.sql` no SQL Editor.
+3. Se voce ja executou o schema inicial, execute tambem `supabase_public_migration.sql`.
+4. Copie `.env.example` para `.env.local`.
+5. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.
+
+Para liberar acesso administrativo, rode no SQL Editor:
+
+```sql
+update usuarios
+set id_admin = true
+where email = 'seu-email@dominio.com';
+```
+
+## Mercado Pago
+
+O checkout usa uma rota serverless para manter o `Access Token` fora do frontend:
+
+- `api/mercadopago/create-preference.js`: cria a preferencia do Checkout Pro.
+- `api/mercadopago/webhook.js`: recebe notificacoes de pagamento.
+- `api/mercadopago/sync-payment.js`: sincroniza o retorno do comprador ao app.
+
+Variaveis necessarias:
+
+```env
+VITE_SUPABASE_URL=https://seu-projeto.supabase.co
+VITE_SUPABASE_ANON_KEY=sua-chave-anonima
+VITE_MERCADO_PAGO_PUBLIC_KEY=sua-public-key
+MERCADO_PAGO_ACCESS_TOKEN=seu-access-token
+APP_URL=https://seu-dominio.com
+```
+
+Variaveis recomendadas em producao:
+
+```env
+MERCADO_PAGO_WEBHOOK_SECRET=seu-webhook-secret
+SUPABASE_SERVICE_ROLE_KEY=sua-service-role-key
+```
+
+No Vercel, cadastre essas variaveis em Project Settings > Environment Variables. Nunca publique `.env.local`.
+
+## Publicar na Vercel
+
+1. Importe o repositorio `ademiragencia/rifamax`.
+2. Framework: Vite.
+3. Build command: `npm run build`.
+4. Output directory: `dist`.
+5. Cadastre todas as variaveis do `.env.example`.
+6. Configure `APP_URL` com a URL final do deploy.
+7. No Mercado Pago, configure o webhook para:
+
+```text
+https://seu-dominio.vercel.app/api/mercadopago/webhook
+```
+
+Com as credenciais preenchidas, o app usa Supabase como fonte de dados publica. Sem credenciais, ele cai no modo demo local apenas para desenvolvimento.
+# RifaMax
+
 Aplicacao React concluida a partir dos arquivos do ZIP. Ela roda localmente com dados de demonstracao e ja deixa a configuracao do Supabase separada para quando voce quiser conectar um banco real.
 
 ## Rodar localmente
