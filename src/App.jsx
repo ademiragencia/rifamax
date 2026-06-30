@@ -381,27 +381,62 @@ export default function App() {
 
     if (!externalReference || !rawStatus) return
 
-    const nextStatus = normalizePaymentStatus(rawStatus)
+    async function syncPaymentReturn() {
+      let nextStatus = normalizePaymentStatus(rawStatus)
 
-    setCompras((current) =>
-      current.map((compra) =>
-        compra.external_reference === externalReference
-          ? {
-              ...compra,
-              id_transacao_mp: paymentId || compra.id_transacao_mp,
-              status_pagamento: nextStatus,
-            }
-          : compra,
-      ),
-    )
+      if (isRemoteMode && paymentId) {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
 
-    goTo('minhas-compras')
-    notify(
-      nextStatus === 'confirmado'
-        ? 'Pagamento aprovado pelo Mercado Pago.'
-        : 'Recebemos o retorno do Mercado Pago. A compra esta pendente ou precisa de revisao.',
-    )
-    window.history.replaceState({}, '', window.location.pathname)
+        if (session?.access_token) {
+          const response = await fetch('/api/mercadopago/sync-payment', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              externalReference,
+              paymentId,
+              supabaseAccessToken: session.access_token,
+            }),
+          })
+
+          const result = await response.json().catch(() => ({}))
+
+          if (response.ok && result.status_pagamento) {
+            nextStatus = result.status_pagamento
+          }
+        }
+      }
+
+      setCompras((current) =>
+        current.map((compra) =>
+          compra.external_reference === externalReference
+            ? {
+                ...compra,
+                id_transacao_mp: paymentId || compra.id_transacao_mp,
+                status_pagamento: nextStatus,
+              }
+            : compra,
+        ),
+      )
+
+      await carregarDadosRemotos()
+      goTo('minhas-compras')
+      notify(
+        nextStatus === 'confirmado'
+          ? 'Pagamento aprovado pelo Mercado Pago.'
+          : 'Recebemos o retorno do Mercado Pago. A compra esta pendente ou precisa de revisao.',
+      )
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+
+    syncPaymentReturn().catch((error) => {
+      notify(error.message || 'Nao foi possivel sincronizar o pagamento.')
+    })
+    // Sincronizacao acontece somente quando a URL de retorno muda.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setCompras])
 
   function notify(text) {
