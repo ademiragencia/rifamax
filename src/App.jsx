@@ -20,7 +20,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { dataMode } from './lib/supabaseClient'
+import { dataMode, hasSupabaseConfig, supabase } from './lib/supabaseClient'
 import './App.css'
 
 const currency = new Intl.NumberFormat('pt-BR', {
@@ -141,6 +141,23 @@ const emptyRifa = {
   premio_descricao: '',
 }
 
+function buildDemoNumerosRifa() {
+  const vendidos = new Set(demoCompras.flatMap((compra) => compra.numeros.map((numero) => `${compra.rifa_id}:${numero}`)))
+
+  return demoRifas.flatMap((rifa) =>
+    Array.from({ length: rifa.total_numeros }, (_, index) => {
+      const numero = index + 1
+
+      return {
+        id: `${rifa.id}-${numero}`,
+        rifa_id: rifa.id,
+        numero,
+        vendido: vendidos.has(`${rifa.id}:${numero}`),
+      }
+    }),
+  )
+}
+
 function createId(prefix) {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return `${prefix}-${crypto.randomUUID()}`
@@ -170,16 +187,25 @@ function usePersistentState(key, initialValue) {
   return [value, setValue]
 }
 
-function getSoldNumbers(compras, rifaId) {
+function isBlockingPurchase(compra) {
+  return !['falha', 'reembolso', 'cancelado'].includes(normalizePaymentStatus(compra.status_pagamento))
+}
+
+function getSoldNumbers(compras, rifaId, numerosRifa = []) {
   return new Set(
-    compras
-      .filter((compra) => compra.rifa_id === rifaId && compra.status_pagamento === 'confirmado')
+    [
+      ...compras
+      .filter((compra) => compra.rifa_id === rifaId && isBlockingPurchase(compra))
       .flatMap((compra) => compra.numeros),
+      ...numerosRifa
+        .filter((numero) => numero.rifa_id === rifaId && numero.vendido)
+        .map((numero) => numero.numero),
+    ],
   )
 }
 
-function getRifaStats(rifa, compras) {
-  const soldNumbers = getSoldNumbers(compras, rifa.id)
+function getRifaStats(rifa, compras, numerosRifa = []) {
+  const soldNumbers = getSoldNumbers(compras, rifa.id, numerosRifa)
   const vendidos = soldNumbers.size
   const disponiveis = Math.max(rifa.total_numeros - vendidos, 0)
   const percentual = rifa.total_numeros > 0 ? Math.round((vendidos / rifa.total_numeros) * 100) : 0
@@ -216,9 +242,11 @@ function sortNumbers(numbers) {
 }
 
 export default function App() {
+  const isRemoteMode = hasSupabaseConfig && Boolean(supabase)
   const [usuarios, setUsuarios] = usePersistentState('rifamax:usuarios', demoUsers)
   const [rifas, setRifas] = usePersistentState('rifamax:rifas', demoRifas)
   const [compras, setCompras] = usePersistentState('rifamax:compras', demoCompras)
+  const [numerosRifa, setNumerosRifa] = usePersistentState('rifamax:numeros', buildDemoNumerosRifa())
   const [currentUserId, setCurrentUserId] = usePersistentState('rifamax:sessao', '')
   const [view, setView] = useState('rifas')
   const [selectedRifaId, setSelectedRifaId] = useState(demoRifas[0].id)
@@ -230,6 +258,7 @@ export default function App() {
   const [novaRifa, setNovaRifa] = useState(emptyRifa)
   const [message, setMessage] = useState('')
   const [paymentLoading, setPaymentLoading] = useState(false)
+  const [remoteLoading, setRemoteLoading] = useState(false)
 
   const user = useMemo(
     () => usuarios.find((usuario) => usuario.id === currentUserId) || null,
@@ -261,7 +290,10 @@ export default function App() {
 
   const dashboardStats = useMemo(() => {
     const totalReceita = compras.reduce((sum, compra) => sum + compra.valor_total, 0)
-    const totalNumeros = compras.reduce((sum, compra) => sum + compra.quantidade_numeros, 0)
+    const totalNumeros = rifas.reduce(
+      (sum, rifa) => sum + getSoldNumbers(compras, rifa.id, numerosRifa).size,
+      0,
+    )
     const compradores = new Set(compras.map((compra) => compra.comprador_id)).size
 
     return {
@@ -271,7 +303,7 @@ export default function App() {
       totalNumeros,
       compradores,
     }
-  }, [compras, rifas])
+  }, [compras, numerosRifa, rifas])
 
   useEffect(() => {
     if (!message) return undefined
@@ -283,6 +315,63 @@ export default function App() {
   useEffect(() => {
     setSelectedNumbers([])
   }, [selectedRifaId])
+
+  useEffect(() => {
+    if (!isRemoteMode) return undefined
+
+    let active = true
+
+    async function bootstrapRemoteData() {
+      setRemoteLoading(true)
+
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+
+        const profile = session?.user ? await applyRemoteUser(session.user) : null
+
+        if (!session?.user) {
+          setUsuarios([])
+          setCurrentUserId('')
+          setCompras([])
+        }
+
+        if (active) {
+          await carregarDadosRemotos(profile)
+        }
+      } catch (error) {
+        notify(error.message || 'Erro ao carregar dados do Supabase.')
+      } finally {
+        if (active) setRemoteLoading(false)
+      }
+    }
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!active) return
+
+      const profile = session?.user ? await applyRemoteUser(session.user) : null
+
+      if (!session?.user) {
+        setUsuarios([])
+        setCurrentUserId('')
+        setCompras([])
+      }
+
+      await carregarDadosRemotos(profile)
+    })
+
+    bootstrapRemoteData()
+
+    return () => {
+      active = false
+      subscription.unsubscribe()
+    }
+    // Dados remotos devem ser inicializados apenas quando o modo Supabase muda.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRemoteMode])
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -324,7 +413,121 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  function loginAs(email, password) {
+  function mapRemoteProfile(row, authUser) {
+    return {
+      id: authUser.id,
+      perfil_id: row?.id,
+      id_usuario: authUser.id,
+      nome: row?.nome || authUser.user_metadata?.nome || authUser.email,
+      email: row?.email || authUser.email,
+      id_admin: Boolean(row?.id_admin),
+      data_criacao: row?.data_criacao || authUser.created_at,
+    }
+  }
+
+  function mapRemoteCompra(row) {
+    return {
+      id: row.id,
+      rifa_id: row.rifa_id,
+      comprador_id: row.comprador_id,
+      comprador_nome: row.usuarios?.nome || row.comprador_nome || 'Cliente',
+      numeros: sortNumbers((row.compra_numeros || []).map((item) => item.numero)),
+      valor_total: Number(row.valor_total || 0),
+      quantidade_numeros: row.quantidade_numeros,
+      status_pagamento: row.status_pagamento,
+      metodo_pagamento: row.metodo_pagamento,
+      external_reference: row.referencia_externa,
+      preference_id: row.preference_id,
+      id_transacao_mp: row.id_transacao_mp,
+      data_compra: row.data_compra,
+    }
+  }
+
+  async function applyRemoteUser(authUser) {
+    const { data, error } = await supabase
+      .from('usuarios')
+      .select('*')
+      .eq('id_usuario', authUser.id)
+      .maybeSingle()
+
+    if (error) throw error
+
+    let profile = data
+
+    if (!profile) {
+      const { data: inserted, error: insertError } = await supabase
+        .from('usuarios')
+        .insert({
+          id_usuario: authUser.id,
+          nome: authUser.user_metadata?.nome || authUser.email,
+          email: authUser.email,
+        })
+        .select('*')
+        .single()
+
+      if (insertError) throw insertError
+      profile = inserted
+    }
+
+    const mappedProfile = mapRemoteProfile(profile, authUser)
+
+    setUsuarios([mappedProfile])
+    setCurrentUserId(authUser.id)
+
+    return mappedProfile
+  }
+
+  async function carregarDadosRemotos(profile = user) {
+    if (!isRemoteMode) return
+
+    const { data: rifasData, error: rifasError } = await supabase
+      .from('rifas')
+      .select('*')
+      .order('data_criacao', { ascending: false })
+
+    if (rifasError) throw rifasError
+
+    const { data: numerosData, error: numerosError } = await supabase
+      .from('numeros_rifa')
+      .select('id, rifa_id, numero, vendido, comprador_id, data_venda')
+      .order('numero', { ascending: true })
+
+    if (numerosError) throw numerosError
+
+    setRifas((rifasData || []).map((rifa) => ({ ...rifa, preco: Number(rifa.preco) })))
+    setNumerosRifa(numerosData || [])
+
+    const {
+      data: { user: authUser },
+    } = await supabase.auth.getUser()
+
+    if (!authUser) {
+      setCompras([])
+      return
+    }
+
+    let comprasQuery = supabase
+      .from('compras')
+      .select('*, compra_numeros(numero)')
+      .order('data_compra', { ascending: false })
+
+    if (!profile?.id_admin) {
+      comprasQuery = comprasQuery.eq('comprador_id', authUser.id)
+    }
+
+    const { data: comprasData, error: comprasError } = await comprasQuery
+
+    if (comprasError) throw comprasError
+
+    setCompras((comprasData || []).map(mapRemoteCompra))
+  }
+
+  async function loginAs(email, password) {
+    if (isRemoteMode) {
+      notify('Os acessos demo ficam desativados no modo publico. Use uma conta real.')
+      return false
+    }
+
     const match = usuarios.find(
       (usuario) => usuario.email === normalizeEmail(email) && usuario.password === password,
     )
@@ -341,17 +544,75 @@ export default function App() {
     return true
   }
 
-  function handleLogin(event) {
+  async function handleLogin(event) {
     event.preventDefault()
-    loginAs(loginForm.email, loginForm.password)
+
+    if (!isRemoteMode) {
+      await loginAs(loginForm.email, loginForm.password)
+      return
+    }
+
+    try {
+      setRemoteLoading(true)
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: normalizeEmail(loginForm.email),
+        password: loginForm.password,
+      })
+
+      if (error) throw error
+
+      const profile = await applyRemoteUser(data.user)
+      await carregarDadosRemotos(profile)
+      setLoginForm({ email: '', password: '' })
+      goTo('rifas')
+      notify(`Bem-vindo, ${profile.nome}.`)
+    } catch (error) {
+      notify(error.message || 'Erro ao fazer login.')
+    } finally {
+      setRemoteLoading(false)
+    }
   }
 
-  function handleRegistro(event) {
+  async function handleRegistro(event) {
     event.preventDefault()
 
     const email = normalizeEmail(registroForm.email)
     if (registroForm.password !== registroForm.confirm) {
       notify('As senhas nao coincidem.')
+      return
+    }
+
+    if (isRemoteMode) {
+      try {
+        setRemoteLoading(true)
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password: registroForm.password,
+          options: {
+            data: {
+              nome: registroForm.nome.trim(),
+            },
+          },
+        })
+
+        if (error) throw error
+
+        if (data.session?.user) {
+          const profile = await applyRemoteUser(data.session.user)
+          await carregarDadosRemotos(profile)
+          setRegistroForm({ nome: '', email: '', password: '', confirm: '' })
+          goTo('rifas')
+          notify('Conta criada. Voce ja pode comprar numeros.')
+        } else {
+          setAuthMode('login')
+          notify('Cadastro criado. Confira seu email e depois faca login.')
+        }
+      } catch (error) {
+        notify(error.message || 'Erro ao criar conta.')
+      } finally {
+        setRemoteLoading(false)
+      }
+
       return
     }
 
@@ -376,7 +637,13 @@ export default function App() {
     notify('Conta criada. Voce ja pode comprar numeros.')
   }
 
-  function logout() {
+  async function logout() {
+    if (isRemoteMode) {
+      await supabase.auth.signOut()
+      setUsuarios([])
+      setCompras([])
+    }
+
     setCurrentUserId('')
     goTo('rifas')
     notify('Sessao encerrada.')
@@ -397,7 +664,7 @@ export default function App() {
   function toggleNumero(numero) {
     if (!selectedRifa) return
 
-    const vendidos = getSoldNumbers(compras, selectedRifa.id)
+    const vendidos = getSoldNumbers(compras, selectedRifa.id, numerosRifa)
     if (vendidos.has(numero)) return
 
     setSelectedNumbers((current) =>
@@ -420,7 +687,7 @@ export default function App() {
       return
     }
 
-    const vendidos = getSoldNumbers(compras, selectedRifa.id)
+    const vendidos = getSoldNumbers(compras, selectedRifa.id, numerosRifa)
     const conflitos = selectedNumbers.filter((numero) => vendidos.has(numero))
     if (conflitos.length > 0) {
       setSelectedNumbers((current) => current.filter((numero) => !vendidos.has(numero)))
@@ -484,7 +751,56 @@ export default function App() {
         data_compra: new Date().toISOString(),
       }
 
+      if (isRemoteMode) {
+        const { data: compra, error: compraError } = await supabase
+          .from('compras')
+          .insert({
+            rifa_id: selectedRifa.id,
+            comprador_id: user.id,
+            valor_total: valorTotal,
+            quantidade_numeros: numeros.length,
+            status_pagamento: 'pendente',
+            metodo_pagamento: 'mercado_pago',
+            referencia_externa: externalReference,
+          })
+          .select('*')
+          .single()
+
+        if (compraError) throw compraError
+
+        const { error: numerosCompraError } = await supabase.from('compra_numeros').insert(
+          numeros.map((numero) => ({
+            compra_id: compra.id,
+            rifa_id: selectedRifa.id,
+            numero,
+          })),
+        )
+
+        if (numerosCompraError) throw numerosCompraError
+
+        const { error: reservaError } = await supabase
+          .from('numeros_rifa')
+          .update({
+            vendido: true,
+            comprador_id: user.id,
+            data_venda: new Date().toISOString(),
+          })
+          .eq('rifa_id', selectedRifa.id)
+          .in('numero', numeros)
+
+        if (reservaError) throw reservaError
+
+        novaCompra.id = compra.id
+      }
+
       setCompras((current) => [novaCompra, ...current])
+      setNumerosRifa((current) =>
+        current.map((item) =>
+          item.rifa_id === selectedRifa.id && numeros.includes(item.numero)
+            ? { ...item, vendido: true, comprador_id: user.id }
+            : item,
+        ),
+      )
       setSelectedNumbers([])
       window.location.href = preference.init_point
     } catch (error) {
@@ -494,7 +810,7 @@ export default function App() {
     }
   }
 
-  function handleCriarRifa(event) {
+  async function handleCriarRifa(event) {
     event.preventDefault()
 
     if (!isAdmin) {
@@ -515,8 +831,7 @@ export default function App() {
       return
     }
 
-    const rifa = {
-      id: createId('rifa'),
+    const rifaPayload = {
       nome: novaRifa.nome.trim(),
       descricao: novaRifa.descricao.trim(),
       imagem: novaRifa.imagem.trim(),
@@ -526,25 +841,92 @@ export default function App() {
       criador_id: user.id,
       ativa: true,
       data_termino: novaRifa.data_termino,
-      data_criacao: new Date().toISOString(),
     }
 
-    setRifas((current) => [rifa, ...current])
-    setNovaRifa(emptyRifa)
-    goTo('admin')
-    notify('Rifa criada com sucesso.')
+    try {
+      if (isRemoteMode) {
+        setRemoteLoading(true)
+
+        const { data: rifa, error } = await supabase
+          .from('rifas')
+          .insert(rifaPayload)
+          .select('*')
+          .single()
+
+        if (error) throw error
+
+        const numeros = Array.from({ length: totalNumeros }, (_, index) => ({
+          rifa_id: rifa.id,
+          numero: index + 1,
+          vendido: false,
+        }))
+
+        const { error: numerosError } = await supabase.from('numeros_rifa').insert(numeros)
+
+        if (numerosError) throw numerosError
+
+        await carregarDadosRemotos(user)
+      } else {
+        const rifa = {
+          ...rifaPayload,
+          id: createId('rifa'),
+          data_criacao: new Date().toISOString(),
+        }
+
+        setRifas((current) => [rifa, ...current])
+        setNumerosRifa((current) => [
+          ...Array.from({ length: totalNumeros }, (_, index) => ({
+            id: `${rifa.id}-${index + 1}`,
+            rifa_id: rifa.id,
+            numero: index + 1,
+            vendido: false,
+          })),
+          ...current,
+        ])
+      }
+
+      setNovaRifa(emptyRifa)
+      goTo('admin')
+      notify('Rifa criada com sucesso.')
+    } catch (error) {
+      notify(error.message || 'Erro ao criar rifa.')
+    } finally {
+      setRemoteLoading(false)
+    }
   }
 
-  function toggleRifaStatus(rifaId) {
+  async function toggleRifaStatus(rifaId) {
+    if (isRemoteMode) {
+      const rifaAtual = rifas.find((rifa) => rifa.id === rifaId)
+      if (!rifaAtual) return
+
+      const { error } = await supabase.from('rifas').update({ ativa: !rifaAtual.ativa }).eq('id', rifaId)
+
+      if (error) {
+        notify(error.message || 'Erro ao atualizar rifa.')
+        return
+      }
+
+      await carregarDadosRemotos(user)
+      return
+    }
+
     setRifas((current) =>
       current.map((rifa) => (rifa.id === rifaId ? { ...rifa, ativa: !rifa.ativa } : rifa)),
     )
   }
 
   function resetDemoData() {
+    if (isRemoteMode) {
+      carregarDadosRemotos(user)
+      notify('Dados recarregados do Supabase.')
+      return
+    }
+
     setUsuarios(demoUsers)
     setRifas(demoRifas)
     setCompras(demoCompras)
+    setNumerosRifa(buildDemoNumerosRifa())
     setCurrentUserId('')
     setSelectedRifaId(demoRifas[0].id)
     setSelectedNumbers([])
@@ -561,7 +943,7 @@ export default function App() {
           </span>
           <span>
             <strong>RifaMax</strong>
-            <small>{dataMode === 'configured' ? 'Supabase preparado' : 'Demo local'}</small>
+            <small>{dataMode === 'configured' ? 'Online com Supabase' : 'Demo local'}</small>
           </span>
         </button>
 
@@ -616,8 +998,9 @@ export default function App() {
             <p className="eyebrow">Plataforma de rifas online</p>
             <h1>Escolha seus numeros e acompanhe tudo em tempo real.</h1>
             <p className="lead">
-              O fluxo esta pronto para demonstracao: login, cadastro, painel admin, criacao de
-              rifas, selecao de numeros e historico de compras.
+              {isRemoteMode
+                ? 'Rifas, usuarios, numeros reservados e compras agora usam o banco real.'
+                : 'O fluxo esta pronto para demonstracao: login, cadastro, painel admin, criacao de rifas, selecao de numeros e historico de compras.'}
             </p>
           </div>
 
@@ -626,29 +1009,38 @@ export default function App() {
               <Users size={18} aria-hidden="true" />
               {user ? user.nome : 'Visitante'}
             </div>
-            <button
-              className="outline-button"
-              type="button"
-              onClick={() => loginAs('cliente@rifamax.com', 'cliente123')}
-            >
-              <LogIn size={17} aria-hidden="true" />
-              Cliente demo
-            </button>
-            <button
-              className="outline-button"
-              type="button"
-              onClick={() => loginAs('admin@rifamax.com', 'admin123')}
-            >
-              <ShieldCheck size={17} aria-hidden="true" />
-              Admin demo
-            </button>
+            {isRemoteMode ? (
+              <button className="outline-button" type="button" onClick={() => goTo(user ? 'minhas-compras' : 'auth')}>
+                <ShieldCheck size={17} aria-hidden="true" />
+                {user ? 'Minha conta' : 'Entrar agora'}
+              </button>
+            ) : (
+              <>
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => loginAs('cliente@rifamax.com', 'cliente123')}
+                >
+                  <LogIn size={17} aria-hidden="true" />
+                  Cliente demo
+                </button>
+                <button
+                  className="outline-button"
+                  type="button"
+                  onClick={() => loginAs('admin@rifamax.com', 'admin123')}
+                >
+                  <ShieldCheck size={17} aria-hidden="true" />
+                  Admin demo
+                </button>
+              </>
+            )}
           </div>
         </section>
 
         <section className="metric-grid" aria-label="Resumo">
           <Metric icon={Ticket} label="Rifas ativas" value={dashboardStats.ativas} />
           <Metric icon={ShoppingCart} label="Numeros vendidos" value={dashboardStats.totalNumeros} />
-          <Metric icon={Banknote} label="Faturamento demo" value={currency.format(dashboardStats.totalReceita)} />
+          <Metric icon={Banknote} label={isRemoteMode ? 'Faturamento' : 'Faturamento demo'} value={currency.format(dashboardStats.totalReceita)} />
           <Metric icon={Users} label="Compradores" value={dashboardStats.compradores} />
         </section>
 
@@ -698,7 +1090,7 @@ export default function App() {
   }
 
   function RifaCard({ rifa }) {
-    const stats = getRifaStats(rifa, compras)
+    const stats = getRifaStats(rifa, compras, numerosRifa)
 
     return (
       <article className="raffle-card">
@@ -747,10 +1139,12 @@ export default function App() {
           <p className="eyebrow">Acesso</p>
           <h1>{authMode === 'login' ? 'Entre para comprar numeros.' : 'Crie sua conta em segundos.'}</h1>
           <p className="lead">
-            Use os acessos de demonstracao para testar o painel completo sem configurar o Supabase.
+            {isRemoteMode
+              ? 'Entre com seu email e senha para comprar numeros e acompanhar pagamentos.'
+              : 'Use os acessos de demonstracao para testar o painel completo sem configurar o Supabase.'}
           </p>
 
-          <div className="demo-login-row">
+          {!isRemoteMode && <div className="demo-login-row">
             <button
               className="outline-button"
               type="button"
@@ -767,7 +1161,7 @@ export default function App() {
               <ShieldCheck size={17} aria-hidden="true" />
               Admin demo
             </button>
-          </div>
+          </div>}
         </section>
 
         <section className="form-panel">
@@ -814,7 +1208,7 @@ export default function App() {
               </label>
               <button className="primary-button full" type="submit">
                 <LogIn size={17} aria-hidden="true" />
-                Entrar
+                {remoteLoading ? 'Entrando...' : 'Entrar'}
               </button>
             </form>
           ) : (
@@ -861,7 +1255,7 @@ export default function App() {
               </label>
               <button className="primary-button full" type="submit">
                 <UserPlus size={17} aria-hidden="true" />
-                Criar conta
+                {remoteLoading ? 'Criando...' : 'Criar conta'}
               </button>
             </form>
           )}
@@ -879,8 +1273,8 @@ export default function App() {
       )
     }
 
-    const stats = getRifaStats(selectedRifa, compras)
-    const vendidos = getSoldNumbers(compras, selectedRifa.id)
+    const stats = getRifaStats(selectedRifa, compras, numerosRifa)
+    const vendidos = getSoldNumbers(compras, selectedRifa.id, numerosRifa)
     const total = selectedNumbers.length * selectedRifa.preco
 
     return (
@@ -1041,7 +1435,7 @@ export default function App() {
           <div className="button-row">
             <button className="outline-button" type="button" onClick={resetDemoData}>
               <RefreshCcw size={17} aria-hidden="true" />
-              Restaurar demo
+              {isRemoteMode ? 'Recarregar' : 'Restaurar demo'}
             </button>
             <button className="primary-button" type="button" onClick={() => goTo('criar-rifa')}>
               <Plus size={17} aria-hidden="true" />
@@ -1052,7 +1446,7 @@ export default function App() {
 
         <section className="metric-grid">
           <Metric icon={Ticket} label="Total de rifas" value={dashboardStats.rifas} />
-          <Metric icon={CircleDollarSign} label="Receita simulada" value={currency.format(dashboardStats.totalReceita)} />
+          <Metric icon={CircleDollarSign} label={isRemoteMode ? 'Receita' : 'Receita simulada'} value={currency.format(dashboardStats.totalReceita)} />
           <Metric icon={ShoppingCart} label="Numeros vendidos" value={dashboardStats.totalNumeros} />
           <Metric icon={Users} label="Clientes ativos" value={dashboardStats.compradores} />
         </section>
@@ -1076,7 +1470,7 @@ export default function App() {
               </thead>
               <tbody>
                 {rifas.map((rifa) => {
-                  const stats = getRifaStats(rifa, compras)
+                  const stats = getRifaStats(rifa, compras, numerosRifa)
 
                   return (
                     <tr key={rifa.id}>
