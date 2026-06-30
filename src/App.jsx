@@ -194,6 +194,23 @@ function formatDate(value) {
   return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short' }).format(new Date(value))
 }
 
+function normalizePaymentStatus(status) {
+  const value = String(status || '').toLowerCase()
+
+  if (['approved', 'success', 'confirmado'].includes(value)) return 'confirmado'
+  if (['pending', 'in_process', 'in_mediation', 'pendente'].includes(value)) return 'pendente'
+  if (['rejected', 'cancelled', 'failure', 'falha'].includes(value)) return 'falha'
+  return value || 'pendente'
+}
+
+function getPaymentStatusLabel(status) {
+  const normalized = normalizePaymentStatus(status)
+
+  if (normalized === 'confirmado') return 'Confirmado'
+  if (normalized === 'falha') return 'Falhou'
+  return 'Pendente'
+}
+
 function sortNumbers(numbers) {
   return [...numbers].sort((a, b) => a - b)
 }
@@ -212,6 +229,7 @@ export default function App() {
   const [registroForm, setRegistroForm] = useState({ nome: '', email: '', password: '', confirm: '' })
   const [novaRifa, setNovaRifa] = useState(emptyRifa)
   const [message, setMessage] = useState('')
+  const [paymentLoading, setPaymentLoading] = useState(false)
 
   const user = useMemo(
     () => usuarios.find((usuario) => usuario.id === currentUserId) || null,
@@ -265,6 +283,37 @@ export default function App() {
   useEffect(() => {
     setSelectedNumbers([])
   }, [selectedRifaId])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const externalReference = params.get('external_reference')
+    const rawStatus = params.get('status') || params.get('collection_status') || params.get('payment')
+    const paymentId = params.get('payment_id') || params.get('collection_id')
+
+    if (!externalReference || !rawStatus) return
+
+    const nextStatus = normalizePaymentStatus(rawStatus)
+
+    setCompras((current) =>
+      current.map((compra) =>
+        compra.external_reference === externalReference
+          ? {
+              ...compra,
+              id_transacao_mp: paymentId || compra.id_transacao_mp,
+              status_pagamento: nextStatus,
+            }
+          : compra,
+      ),
+    )
+
+    goTo('minhas-compras')
+    notify(
+      nextStatus === 'confirmado'
+        ? 'Pagamento aprovado pelo Mercado Pago.'
+        : 'Recebemos o retorno do Mercado Pago. A compra esta pendente ou precisa de revisao.',
+    )
+    window.history.replaceState({}, '', window.location.pathname)
+  }, [setCompras])
 
   function notify(text) {
     setMessage(text)
@@ -358,7 +407,7 @@ export default function App() {
     )
   }
 
-  function confirmarCompra() {
+  async function confirmarCompra() {
     if (!user) {
       setAuthMode('login')
       goTo('auth')
@@ -381,23 +430,68 @@ export default function App() {
 
     const numeros = sortNumbers(selectedNumbers)
     const valorTotal = Number((numeros.length * selectedRifa.preco).toFixed(2))
-    const novaCompra = {
-      id: createId('compra'),
-      rifa_id: selectedRifa.id,
-      comprador_id: user.id,
-      comprador_nome: user.nome,
-      numeros,
-      valor_total: valorTotal,
-      quantidade_numeros: numeros.length,
-      status_pagamento: 'confirmado',
-      metodo_pagamento: 'simulado',
-      data_compra: new Date().toISOString(),
-    }
+    const externalReference = createId('mp')
 
-    setCompras((current) => [novaCompra, ...current])
-    setSelectedNumbers([])
-    goTo('minhas-compras')
-    notify('Compra confirmada no modo demonstracao.')
+    setPaymentLoading(true)
+
+    try {
+      const response = await fetch('/api/mercadopago/create-preference', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          buyerEmail: user.email,
+          buyerName: user.nome,
+          externalReference,
+          numeros,
+          premioDescricao: selectedRifa.premio_descricao,
+          rifaId: selectedRifa.id,
+          rifaNome: selectedRifa.nome,
+          unitPrice: selectedRifa.preco,
+        }),
+      })
+
+      const rawResponse = await response.text()
+      let preference = {}
+
+      try {
+        preference = rawResponse ? JSON.parse(rawResponse) : {}
+      } catch {
+        preference = { error: rawResponse || 'Resposta invalida do servidor de pagamento.' }
+      }
+
+      if (!response.ok) {
+        throw new Error(preference.error || 'Nao foi possivel iniciar o pagamento.')
+      }
+
+      if (!preference.init_point) {
+        throw new Error('O Mercado Pago nao retornou o link de checkout.')
+      }
+
+      const novaCompra = {
+        id: createId('compra'),
+        rifa_id: selectedRifa.id,
+        comprador_id: user.id,
+        comprador_nome: user.nome,
+        numeros,
+        valor_total: valorTotal,
+        quantidade_numeros: numeros.length,
+        status_pagamento: 'pendente',
+        metodo_pagamento: 'mercado_pago',
+        external_reference: externalReference,
+        preference_id: preference.id,
+        data_compra: new Date().toISOString(),
+      }
+
+      setCompras((current) => [novaCompra, ...current])
+      setSelectedNumbers([])
+      window.location.href = preference.init_point
+    } catch (error) {
+      notify(error.message || 'Erro ao iniciar pagamento no Mercado Pago.')
+    } finally {
+      setPaymentLoading(false)
+    }
   }
 
   function handleCriarRifa(event) {
@@ -873,10 +967,10 @@ export default function App() {
               className="primary-button full"
               type="button"
               onClick={confirmarCompra}
-              disabled={selectedNumbers.length === 0}
+              disabled={selectedNumbers.length === 0 || paymentLoading}
             >
-              <Check size={17} aria-hidden="true" />
-              Confirmar compra
+              <CircleDollarSign size={17} aria-hidden="true" />
+              {paymentLoading ? 'Criando pagamento...' : 'Pagar com Mercado Pago'}
             </button>
           </aside>
         </section>
@@ -910,9 +1004,9 @@ export default function App() {
               return (
                 <article className="purchase-card" key={compra.id}>
                   <div>
-                    <span className="status-pill">
+                    <span className={`status-pill ${normalizePaymentStatus(compra.status_pagamento)}`}>
                       <BadgeCheck size={15} aria-hidden="true" />
-                      {compra.status_pagamento}
+                      {getPaymentStatusLabel(compra.status_pagamento)}
                     </span>
                     <h2>{rifa?.nome || 'Rifa removida'}</h2>
                     <p>{formatDate(compra.data_compra)}</p>
