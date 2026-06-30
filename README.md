@@ -34,4 +34,28 @@ Abra a URL exibida pelo Vite.
 3. Copie `.env.example` para `.env.local`.
 4. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.
 
+## Conectar Mercado Pago
+
+O checkout usa uma rota serverless para manter o `Access Token` fora do frontend:
+
+- `api/mercadopago/create-preference.js`: cria a preferencia do Checkout Pro.
+- `api/mercadopago/webhook.js`: recebe notificacoes de pagamento.
+
+Variaveis necessarias:
+
+```env
+VITE_MERCADO_PAGO_PUBLIC_KEY=sua-public-key
+MERCADO_PAGO_ACCESS_TOKEN=seu-access-token
+APP_URL=https://seu-dominio.com
+```
+
+Variaveis recomendadas em producao:
+
+```env
+MERCADO_PAGO_WEBHOOK_SECRET=seu-webhook-secret
+SUPABASE_SERVICE_ROLE_KEY=sua-service-role-key
+```
+
+No Vercel, cadastre essas variaveis em Project Settings > Environment Variables. Nunca publique `.env.local`.
+
 O app atual usa o modo local para demonstracao. O cliente Supabase ja esta preparado no projeto para trocar a camada de dados sem deixar credenciais fixas no codigo.
