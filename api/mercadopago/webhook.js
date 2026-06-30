@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createClient } from '@supabase/supabase-js'
 
 const PAYMENT_API_URL = 'https://api.mercadopago.com/v1/payments'
 
@@ -64,31 +65,61 @@ async function updateSupabasePurchase(payment) {
     return { skipped: true }
   }
 
+  const supabase = createClient(supabaseUrl, serviceRoleKey)
   const status = payment.status === 'approved' ? 'confirmado' : payment.status || 'pendente'
 
-  const response = await fetch(
-    `${supabaseUrl.replace(/\/$/, '')}/rest/v1/compras?referencia_externa=eq.${encodeURIComponent(externalReference)}`,
-    {
-      method: 'PATCH',
-      headers: {
-        apikey: serviceRoleKey,
-        Authorization: `Bearer ${serviceRoleKey}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        status_pagamento: status,
-        id_transacao_mp: String(payment.id),
-        data_confirmacao: payment.status === 'approved' ? new Date().toISOString() : null,
-      }),
-    },
-  )
+  const { data: compra, error } = await supabase
+    .from('compras')
+    .update({
+      status_pagamento: status,
+      id_transacao_mp: String(payment.id),
+      data_confirmacao: payment.status === 'approved' ? new Date().toISOString() : null,
+    })
+    .eq('referencia_externa', externalReference)
+    .select('id, rifa_id, comprador_id, compra_numeros(numero)')
+    .single()
 
-  if (!response.ok) {
-    return { skipped: false, error: await response.text() }
+  if (error) {
+    return { skipped: false, error: error.message }
   }
 
-  return { skipped: false, updated: true }
+  const numeros = (compra.compra_numeros || []).map((item) => item.numero)
+
+  if (numeros.length > 0) {
+    if (payment.status === 'approved') {
+      const { error: numerosError } = await supabase
+        .from('numeros_rifa')
+        .update({
+          vendido: true,
+          comprador_id: compra.comprador_id,
+          data_venda: new Date().toISOString(),
+        })
+        .eq('rifa_id', compra.rifa_id)
+        .in('numero', numeros)
+
+      if (numerosError) {
+        return { skipped: false, updated: true, number_error: numerosError.message }
+      }
+    }
+
+    if (['cancelled', 'rejected', 'refunded', 'charged_back'].includes(payment.status)) {
+      const { error: releaseError } = await supabase
+        .from('numeros_rifa')
+        .update({
+          vendido: false,
+          comprador_id: null,
+          data_venda: null,
+        })
+        .eq('rifa_id', compra.rifa_id)
+        .in('numero', numeros)
+
+      if (releaseError) {
+        return { skipped: false, updated: true, number_error: releaseError.message }
+      }
+    }
+  }
+
+  return { skipped: false, updated: true, compra_id: compra.id }
 }
 
 export default async function handler(req, res) {
