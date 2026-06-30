@@ -133,6 +133,34 @@ begin
 end;
 $$;
 
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.usuarios (id_usuario, nome, email)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'nome', new.email),
+    new.email
+  )
+  on conflict (id_usuario) do update
+  set
+    nome = excluded.nome,
+    email = excluded.email,
+    data_atualizacao = now();
+
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+after insert on auth.users
+for each row execute function public.handle_new_user();
+
 drop trigger if exists trigger_usuarios_atualizacao on usuarios;
 create trigger trigger_usuarios_atualizacao
 before update on usuarios
