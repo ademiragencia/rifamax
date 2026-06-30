@@ -31,8 +31,17 @@ Abra a URL exibida pelo Vite.
 
 1. Crie um projeto no Supabase.
 2. Execute `supabase_schema.sql` no SQL Editor.
-3. Copie `.env.example` para `.env.local`.
-4. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.
+3. Se voce ja executou o schema inicial, execute tambem `supabase_public_migration.sql`.
+4. Copie `.env.example` para `.env.local`.
+5. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`.
+
+Para liberar acesso administrativo, rode no SQL Editor:
+
+```sql
+update usuarios
+set id_admin = true
+where email = 'seu-email@dominio.com';
+```
 
 ## Conectar Mercado Pago
 
@@ -58,4 +67,18 @@ SUPABASE_SERVICE_ROLE_KEY=sua-service-role-key
 
 No Vercel, cadastre essas variaveis em Project Settings > Environment Variables. Nunca publique `.env.local`.
 
-O app atual usa o modo local para demonstracao. O cliente Supabase ja esta preparado no projeto para trocar a camada de dados sem deixar credenciais fixas no codigo.
+## Publicar na Vercel
+
+1. Importe o repositorio `ademiragencia/rifamax`.
+2. Framework: Vite.
+3. Build command: `npm run build`.
+4. Output directory: `dist`.
+5. Cadastre todas as variaveis do `.env.example`.
+6. Configure `APP_URL` com a URL final do deploy.
+7. No Mercado Pago, configure o webhook para:
+
+```text
+https://seu-dominio.vercel.app/api/mercadopago/webhook
+```
+
+Com as credenciais preenchidas, o app usa Supabase como fonte de dados publica. Sem credenciais, ele cai no modo demo local.
