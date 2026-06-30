@@ -50,12 +50,15 @@ create table if not exists compras (
   quantidade_numeros integer not null check (quantidade_numeros > 0),
   status_pagamento varchar(50) default 'pendente',
   metodo_pagamento varchar(50) default 'simulado',
+  referencia_externa varchar(120) unique,
   id_transacao_mp varchar(255),
   observacoes text,
   data_compra timestamptz default now(),
   data_confirmacao timestamptz,
   data_atualizacao timestamptz default now()
 );
+
+alter table compras add column if not exists referencia_externa varchar(120);
 
 create table if not exists compra_numeros (
   id uuid primary key default gen_random_uuid(),
@@ -94,6 +97,7 @@ create index if not exists idx_numeros_rifa_id on numeros_rifa(rifa_id);
 create index if not exists idx_numeros_comprador on numeros_rifa(comprador_id);
 create index if not exists idx_compras_comprador on compras(comprador_id);
 create index if not exists idx_compras_rifa on compras(rifa_id);
+create index if not exists idx_compras_referencia_externa on compras(referencia_externa);
 create index if not exists idx_compra_numeros_compra on compra_numeros(compra_id);
 
 alter table usuarios enable row level security;
